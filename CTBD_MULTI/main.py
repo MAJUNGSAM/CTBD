@@ -4,7 +4,7 @@ import os
 import asyncio
 import socketio
 
-# 1. Server Config
+# 1. Configuration
 RENDER_SERVER_URL = "https://ctbd.onrender.com" 
 sio = socketio.AsyncClient()
 
@@ -16,10 +16,12 @@ clock = pygame.time.Clock()
 # 2. Variables
 font = pygame.font.SysFont("arial", 18, bold=True)
 scroll_x = 0
-game_state = "PLAY" 
+game_state = "PLAY"
 MAX_BLOCKS = 100
 SLOT_W = 50
 MAP_SIZE = 30
+
+# Multiplayer Data
 world_data = [[ [["grass"]] for _ in range(MAP_SIZE)] for _ in range(MAP_SIZE)]
 remote_players = {}
 
@@ -31,8 +33,7 @@ drag_start_mouse, drag_start_cam = None, None
 def load_s(name):
     path = os.path.join("assets", name + ".png")
     if os.path.exists(path):
-        img = pygame.image.load(path).convert_alpha()
-        return img
+        return pygame.image.load(path).convert_alpha()
     return None
 
 img_dict = {f"block{i}": load_s(f"block{i}") for i in range(1, MAX_BLOCKS + 1)}
@@ -41,47 +42,46 @@ for d in ["ul", "ur", "dl", "dr"]: img_dict[f"car_{d}"] = load_s(f"car_{d}")
 
 # 4. Socket Events
 @sio.event
-async def connect(): print("Connected!")
+async def connect(): print("Server Connected")
 
 @sio.event
 async def update_world(data):
     global world_data
-    # Reset world and fill from server data
-    new_world = [[ [["grass"]] for _ in range(MAP_SIZE)] for _ in range(MAP_SIZE)]
+    temp_world = [[ [["grass"]] for _ in range(MAP_SIZE)] for _ in range(MAP_SIZE)]
     if "blocks" in data:
         for b in data["blocks"]:
             r, c, z, name = b['r'], b['c'], b['z'], b['name']
             if 0 <= r < MAP_SIZE and 0 <= c < MAP_SIZE:
-                while len(new_world[r][c]) <= z: new_world[r][c].append([])
-                new_world[r][c][z] = [name]
-    world_data = new_world
+                while len(temp_world[r][c]) <= z: temp_world[r][c].append([])
+                temp_world[r][c][z] = [name]
+    world_data = temp_world
 
 @sio.event
 async def player_update(data):
     global remote_players
     remote_players = data
 
-# 5. Helper Functions
-def get_rotated_rc(r, c, rotation):
-    if rotation == 1: return c, MAP_SIZE - 1 - r
-    if rotation == 2: return MAP_SIZE - 1 - r, MAP_SIZE - 1 - c
-    if rotation == 3: return MAP_SIZE - 1 - c, r
+# 5. Math Functions
+def get_rotated_rc(r, c, rot):
+    if rot == 1: return c, MAP_SIZE - 1 - r
+    if rot == 2: return MAP_SIZE - 1 - r, MAP_SIZE - 1 - c
+    if rot == 3: return MAP_SIZE - 1 - c, r
     return r, c
 
-def cart_to_iso(r, c, z, rotation, tw, th, zoom, cx, cy):
-    rr, cc = get_rotated_rc(r, c, rotation)
-    ix = (rr - cc) * (tw // 2) * zoom + cx
-    iy = (rr + cc) * (th // 2) * zoom + cy - (z * 24 * zoom)
+def cart_to_iso(r, c, z, rot, tw, th, zm, cx, cy):
+    rr, cc = get_rotated_rc(r, c, rot)
+    ix = (rr - cc) * (tw // 2) * zm + cx
+    iy = (rr + cc) * (th // 2) * zm + cy - (z * 24 * zm)
     return ix, iy
 
-def iso_to_cart(mx, my, rotation, tw, th, zoom, cx, cy):
-    tx, ty = (mx - cx) / zoom, (my - cy) / zoom
+def iso_to_cart(mx, my, rot, tw, th, zm, cx, cy):
+    tx, ty = (mx - cx) / zm, (my - cy) / zm
     rr = (ty / (th / 2) + tx / (tw / 2)) / 2
     cc = (ty / (th / 2) - tx / (tw / 2)) / 2
-    if rotation == 0: r, c = rr, cc
-    elif rotation == 1: r, c = MAP_SIZE - 1 - cc, rr
-    elif rotation == 2: r, c = MAP_SIZE - 1 - rr, MAP_SIZE - 1 - cc
-    elif rotation == 3: r, c = cc, MAP_SIZE - 1 - rr
+    if rot == 0: r, c = rr, cc
+    elif rot == 1: r, c = MAP_SIZE - 1 - cc, rr
+    elif rot == 2: r, c = MAP_SIZE - 1 - rr, MAP_SIZE - 1 - cc
+    elif rot == 3: r, c = cc, MAP_SIZE - 1 - rr
     return int(r), int(c)
 
 async def main():
@@ -101,28 +101,30 @@ async def main():
         for event in pygame.event.get():
             if event.type == pygame.QUIT: pygame.quit(); sys.exit()
             if event.type == pygame.MOUSEBUTTONDOWN:
-                if my > ch - 100: # UI Area
+                if my > ch - 100: # UI Scroll & Select
                     for i in range(MAX_BLOCKS):
                         if pygame.Rect(20+i*SLOT_W+scroll_x, ch-80, 44, 44).collidepoint(mx, my):
                             selected_block = f"block{i+1}"; break
-                else: # World Area
-                    if event.button == 1: # Left Click: Place
+                else:
+                    if event.button == 1: # Left Click: Place or Remove
                         if 0 <= hr < MAP_SIZE and 0 <= hc < MAP_SIZE:
-                            await sio.emit("place_block", {"r": hr, "c": hc, "z": len(world_data[hr][hc]), "name": selected_block})
-                    if event.button == 3: # Right Click: Drag or Remove
-                        if keys[pygame.K_LSHIFT]: # Shift + Right Click = Remove
-                            if 0 <= hr < MAP_SIZE and 0 <= hc < MAP_SIZE:
+                            if keys[pygame.K_x]: # X key for Delete
                                 await sio.emit("remove_block", {"r": hr, "c": hc})
-                        else: drag_start_mouse, drag_start_cam = (mx, my), (cam_x, cam_y)
+                            else: # Place Block
+                                # SHIFT = Stack, No SHIFT = Ground(0)
+                                target_z = len(world_data[hr][hc]) if keys[pygame.K_LSHIFT] else 0
+                                await sio.emit("place_block", {"r": hr, "c": hc, "z": target_z, "name": selected_block})
+                    if event.button == 3: # Right Click: Camera Drag
+                        drag_start_mouse, drag_start_cam = (mx, my), (cam_x, cam_y)
             
             if event.type == pygame.MOUSEBUTTONUP: drag_start_mouse = None
             if event.type == pygame.MOUSEMOTION and drag_start_mouse:
                 cam_x = drag_start_cam[0] + (mx - drag_start_mouse[0])
                 cam_y = drag_start_cam[1] + (my - drag_start_mouse[1])
             if event.type == pygame.MOUSEWHEEL:
-                zoom = max(0.1, min(zoom + event.y * 0.1, 5.0))
+                zoom = max(0.2, min(zoom + event.y * 0.1, 3.0))
 
-        # Rendering
+        # Render World
         render_list = []
         for r in range(MAP_SIZE):
             for c in range(MAP_SIZE):
@@ -139,9 +141,10 @@ async def main():
                     tw, th = int(img.get_width()*zoom), int(img.get_height()*zoom)
                     screen.blit(pygame.transform.scale(img, (tw, th)), (ix-tw//2, iy+TILE_H*zoom-th))
 
-        # Ghost Block
+        # Ghost Preview (with SHIFT stacking logic)
         if 0 <= hr < MAP_SIZE and 0 <= hc < MAP_SIZE and my < ch - 100:
-            gix, giy = cart_to_iso(hr, hc, len(world_data[hr][hc]), rotation, TILE_W, TILE_H, zoom, cam_x, cam_y)
+            gz = len(world_data[hr][hc]) if keys[pygame.K_LSHIFT] else 0
+            gix, giy = cart_to_iso(hr, hc, gz, rotation, TILE_W, TILE_H, zoom, cam_x, cam_y)
             img = img_dict.get(selected_block)
             if img:
                 tw, th = int(img.get_width()*zoom), int(img.get_height()*zoom)
@@ -149,7 +152,7 @@ async def main():
                 ghost.set_alpha(128)
                 screen.blit(ghost, (gix-tw//2, giy+TILE_H*zoom-th))
 
-        # UI
+        # UI Bar
         pygame.draw.rect(screen, (35, 38, 44), [0, ch-100, cw, 100])
         for i in range(MAX_BLOCKS):
             sx = 20 + i * SLOT_W + scroll_x
@@ -163,3 +166,4 @@ async def main():
         clock.tick(60)
 
 asyncio.run(main())
+
